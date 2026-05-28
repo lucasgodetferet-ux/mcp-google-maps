@@ -13,12 +13,28 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import http from "http";
 
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
 const PORT = process.env.PORT || 3000;
 
-if (!GOOGLE_MAPS_API_KEY) {
-  console.error("❌ Erreur : la variable d'environnement GOOGLE_MAPS_API_KEY est manquante.");
-  process.exit(1);
+// ─── Diagnostic de démarrage ───────────────────────────────────────────────
+// Affiché dans les logs Railway pour diagnostiquer les variables d'env
+console.log("─── Démarrage du serveur ───────────────────────────────");
+console.log(`NODE_ENV            : ${process.env.NODE_ENV ?? "(non défini)"}`);
+console.log(`PORT                : ${PORT}`);
+console.log(`GOOGLE_MAPS_API_KEY : ${process.env.GOOGLE_MAPS_API_KEY ? "✅ présente (" + process.env.GOOGLE_MAPS_API_KEY.slice(0, 8) + "...)" : "❌ MANQUANTE"}`);
+console.log("Variables d'env disponibles :", Object.keys(process.env).filter(k => !k.startsWith("npm_")).join(", "));
+console.log("────────────────────────────────────────────────────────");
+
+// La clé est lue à chaque appel (lazy) pour éviter tout problème de timing
+// et produire un message d'erreur précis côté client plutôt qu'un crash serveur.
+function getApiKey() {
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (!key) {
+    throw new Error(
+      "GOOGLE_MAPS_API_KEY est manquante côté serveur. " +
+      "Vérifie le nom exact de la variable dans Railway (casse, espaces)."
+    );
+  }
+  return key;
 }
 
 // ─── Outils disponibles ────────────────────────────────────────────────────
@@ -93,7 +109,7 @@ async function fetchDirections(origin, destination) {
     destination,
     mode: "walking",
     language: "fr",
-    key: GOOGLE_MAPS_API_KEY,
+    key: getApiKey(),
   });
 
   const url = `https://maps.googleapis.com/maps/api/directions/json?${params}`;
