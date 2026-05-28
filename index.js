@@ -2,11 +2,11 @@
 
 /**
  * MCP Server — Google Maps Directions (Walking)
- * Mode : HTTP + SSE (compatible Railway / Claude Desktop remote)
+ * Mode : Streamable HTTP (protocole MCP 2025-03-26, sans OAuth)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -255,18 +255,19 @@ function createMcpServer() {
   return server;
 }
 
-// ─── Serveur HTTP ──────────────────────────────────────────────────────────
-
-// Map sessionId → SSEServerTransport (pour router les POST)
-const transports = new Map();
+// ─── Serveur HTTP (Streamable HTTP — protocole MCP 2025-03-26) ────────────
+//
+// Un seul endpoint POST /mcp gère tout le protocole MCP.
+// Pas d'OAuth, pas de session externe : chaque requête POST est autonome.
+// Claude Desktop (>= 0.7) utilise ce protocole par défaut.
 
 const httpServer = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
-  // CORS — nécessaire pour Claude Desktop et les clients web
+  // CORS — pas de header WWW-Authenticate -> pas de déclenchement OAuth
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id, Accept");
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -274,54 +275,40 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── Health check ──────────────────────────────────────────────────────────
+  // Health check
   if (req.method === "GET" && url.pathname === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok", server: "google-maps-walking", version: "1.0.0" }));
     return;
   }
 
-  // ── Connexion SSE : le client ouvre un canal d'écoute ────────────────────
-  if (req.method === "GET" && url.pathname === "/sse") {
-    console.log("[SSE] Nouvelle connexion client");
-
-    const transport = new SSEServerTransport("/messages", res);
-    const server = createMcpServer();
-
-    transports.set(transport.sessionId, transport);
-
-    res.on("close", () => {
-      console.log(`[SSE] Connexion fermée : ${transport.sessionId}`);
-      transports.delete(transport.sessionId);
-    });
-
-    await server.connect(transport);
-    return;
-  }
-
-  // ── Messages entrants du client → on route vers le bon transport ──────────
-  if (req.method === "POST" && url.pathname === "/messages") {
-    const sessionId = url.searchParams.get("sessionId");
-    const transport = transports.get(sessionId);
-
-    if (!transport) {
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: `Session introuvable : ${sessionId}` }));
-      return;
+  // Endpoint MCP principal — stateless, un transport par requête
+  if (url.pathname === "/mcp") {
+    try {
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+      const server = createMcpServer();
+      res.on("close", () => server.close().catch(() => {}));
+      await server.connect(transport);
+      await transport.handleRequest(req, res);
+    } catch (err) {
+      console.error("[MCP] Erreur :", err.message);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: err.message }));
+      }
     }
-
-    await transport.handlePostMessage(req, res);
     return;
   }
 
-  // ── 404 pour tout le reste ────────────────────────────────────────────────
+  // 404
   res.writeHead(404, { "Content-Type": "application/json" });
   res.end(JSON.stringify({ error: "Route inconnue", path: url.pathname }));
 });
 
 httpServer.listen(PORT, () => {
   console.log(`✅ Serveur MCP Google Maps Walking démarré sur le port ${PORT}`);
-  console.log(`   SSE  : http://localhost:${PORT}/sse`);
-  console.log(`   POST : http://localhost:${PORT}/messages?sessionId=<id>`);
+  console.log(`   MCP    : http://localhost:${PORT}/mcp`);
   console.log(`   Health : http://localhost:${PORT}/health`);
 });
