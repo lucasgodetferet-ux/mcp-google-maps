@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "google-maps-walking": {
+      "command": "node",
+      "args": ["/CHEMIN/ABSOLU/VERS/mcp-google-maps/index.js"],
+      "env": {
+        "GOOGLE_MAPS_API_KEY": "AIzaSyBWy0O7nA15TpWFmp4CkqX3xQAUJT24aII"
+      }
+    }
+  }
+}
