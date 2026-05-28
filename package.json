@@ -1,12 +1,11 @@
 {
   "name": "mcp-google-maps-walking",
   "version": "1.0.0",
-  "description": "Serveur MCP pour calculer les temps de trajet à pied via Google Maps Directions API",
+  "description": "Serveur MCP HTTP/SSE pour calculer les temps de trajet à pied via Google Maps Directions API",
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "GOOGLE_MAPS_API_KEY=ta_clé_ici node index.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"

@@ -2,17 +2,19 @@
 
 /**
  * MCP Server — Google Maps Directions (Walking)
- * Calcule les temps de trajet à pied entre deux adresses.
+ * Mode : HTTP + SSE (compatible Railway / Claude Desktop remote)
  */
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import http from "http";
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY;
+const PORT = process.env.PORT || 3000;
 
 if (!GOOGLE_MAPS_API_KEY) {
   console.error("❌ Erreur : la variable d'environnement GOOGLE_MAPS_API_KEY est manquante.");
@@ -37,11 +39,6 @@ const TOOLS = [
           type: "string",
           description: "Adresse d'arrivée (ex: '10 Rue de Rivoli, 75001 Paris')",
         },
-        departure_time: {
-          type: "string",
-          description:
-            "Heure de départ au format ISO 8601 (optionnel, ex: '2026-05-28T09:00:00'). Si absent, utilise l'heure actuelle.",
-        },
       },
       required: ["origin", "destination"],
     },
@@ -53,14 +50,8 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        origin: {
-          type: "string",
-          description: "Adresse de départ",
-        },
-        destination: {
-          type: "string",
-          description: "Adresse d'arrivée",
-        },
+        origin: { type: "string", description: "Adresse de départ" },
+        destination: { type: "string", description: "Adresse d'arrivée" },
       },
       required: ["origin", "destination"],
     },
@@ -82,7 +73,7 @@ const TOOLS = [
               destination: { type: "string", description: "Adresse d'arrivée" },
               label: {
                 type: "string",
-                description: "Label optionnel pour identifier ce trajet (ex: 'Séance 1 → Séance 2')",
+                description: "Label optionnel (ex: 'Séance 1 → Séance 2')",
               },
             },
             required: ["origin", "destination"],
@@ -138,11 +129,10 @@ async function fetchDirections(origin, destination) {
   };
 }
 
-// ─── Gestionnaire des outils ───────────────────────────────────────────────
+// ─── Gestionnaires d'outils ────────────────────────────────────────────────
 
 async function handleGetWalkingDirections({ origin, destination }) {
   const result = await fetchDirections(origin, destination);
-
   return {
     content: [
       {
@@ -152,10 +142,10 @@ async function handleGetWalkingDirections({ origin, destination }) {
           `📍 De : ${result.start_address}`,
           `📍 À  : ${result.end_address}`,
           ``,
-          `⏱  Durée   : ${result.duration_text} (${result.duration_seconds}s)`,
+          `⏱  Durée    : ${result.duration_text} (${result.duration_seconds}s)`,
           `📏 Distance : ${result.distance_text} (${result.distance_meters}m)`,
-          result.summary ? `🗺  Via     : ${result.summary}` : "",
-          `🔢 Étapes  : ${result.steps_count} étapes`,
+          result.summary ? `🗺  Via      : ${result.summary}` : "",
+          `🔢 Étapes   : ${result.steps_count} étapes`,
         ]
           .filter(Boolean)
           .join("\n"),
@@ -166,7 +156,6 @@ async function handleGetWalkingDirections({ origin, destination }) {
 
 async function handleGetWalkingDurationSeconds({ origin, destination }) {
   const result = await fetchDirections(origin, destination);
-
   return {
     content: [
       {
@@ -194,9 +183,7 @@ async function handleGetMultipleWalkingDurations({ pairs }) {
   const lines = ["🚶 Temps de trajet à pied (multi-trajets)", ""];
 
   results.forEach((result, i) => {
-    const pair = pairs[i];
-    const label = pair.label || `Trajet ${i + 1}`;
-
+    const label = pairs[i].label || `Trajet ${i + 1}`;
     if (result.status === "fulfilled") {
       const d = result.value;
       lines.push(`✅ ${label}`);
@@ -208,7 +195,6 @@ async function handleGetMultipleWalkingDurations({ pairs }) {
     lines.push("");
   });
 
-  // Résumé total
   const successes = results.filter((r) => r.status === "fulfilled");
   if (successes.length > 0) {
     const totalSeconds = successes.reduce((sum, r) => sum + r.value.duration_seconds, 0);
@@ -216,44 +202,110 @@ async function handleGetMultipleWalkingDurations({ pairs }) {
     lines.push(`📊 Total déplacements : ${totalMinutes} min (${successes.length}/${results.length} trajets)`);
   }
 
-  return {
-    content: [{ type: "text", text: lines.join("\n") }],
-  };
+  return { content: [{ type: "text", text: lines.join("\n") }] };
 }
 
-// ─── Serveur MCP ───────────────────────────────────────────────────────────
+// ─── Fabrique de serveur MCP (une instance par connexion SSE) ──────────────
 
-const server = new Server(
-  { name: "google-maps-walking", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
+function createMcpServer() {
+  const server = new Server(
+    { name: "google-maps-walking", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-
-  try {
-    switch (name) {
-      case "get_walking_directions":
-        return await handleGetWalkingDirections(args);
-      case "get_walking_duration_seconds":
-        return await handleGetWalkingDurationSeconds(args);
-      case "get_multiple_walking_durations":
-        return await handleGetMultipleWalkingDurations(args);
-      default:
-        throw new Error(`Outil inconnu : ${name}`);
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      switch (name) {
+        case "get_walking_directions":
+          return await handleGetWalkingDirections(args);
+        case "get_walking_duration_seconds":
+          return await handleGetWalkingDurationSeconds(args);
+        case "get_multiple_walking_durations":
+          return await handleGetMultipleWalkingDurations(args);
+        default:
+          throw new Error(`Outil inconnu : ${name}`);
+      }
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `❌ Erreur : ${error.message}` }],
+        isError: true,
+      };
     }
-  } catch (error) {
-    return {
-      content: [{ type: "text", text: `❌ Erreur : ${error.message}` }],
-      isError: true,
-    };
+  });
+
+  return server;
+}
+
+// ─── Serveur HTTP ──────────────────────────────────────────────────────────
+
+// Map sessionId → SSEServerTransport (pour router les POST)
+const transports = new Map();
+
+const httpServer = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  // CORS — nécessaire pour Claude Desktop et les clients web
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
   }
+
+  // ── Health check ──────────────────────────────────────────────────────────
+  if (req.method === "GET" && url.pathname === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", server: "google-maps-walking", version: "1.0.0" }));
+    return;
+  }
+
+  // ── Connexion SSE : le client ouvre un canal d'écoute ────────────────────
+  if (req.method === "GET" && url.pathname === "/sse") {
+    console.log("[SSE] Nouvelle connexion client");
+
+    const transport = new SSEServerTransport("/messages", res);
+    const server = createMcpServer();
+
+    transports.set(transport.sessionId, transport);
+
+    res.on("close", () => {
+      console.log(`[SSE] Connexion fermée : ${transport.sessionId}`);
+      transports.delete(transport.sessionId);
+    });
+
+    await server.connect(transport);
+    return;
+  }
+
+  // ── Messages entrants du client → on route vers le bon transport ──────────
+  if (req.method === "POST" && url.pathname === "/messages") {
+    const sessionId = url.searchParams.get("sessionId");
+    const transport = transports.get(sessionId);
+
+    if (!transport) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: `Session introuvable : ${sessionId}` }));
+      return;
+    }
+
+    await transport.handlePostMessage(req, res);
+    return;
+  }
+
+  // ── 404 pour tout le reste ────────────────────────────────────────────────
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Route inconnue", path: url.pathname }));
 });
 
-// ─── Démarrage ─────────────────────────────────────────────────────────────
-
-const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error("✅ Serveur MCP Google Maps Walking démarré");
+httpServer.listen(PORT, () => {
+  console.log(`✅ Serveur MCP Google Maps Walking démarré sur le port ${PORT}`);
+  console.log(`   SSE  : http://localhost:${PORT}/sse`);
+  console.log(`   POST : http://localhost:${PORT}/messages?sessionId=<id>`);
+  console.log(`   Health : http://localhost:${PORT}/health`);
+});
